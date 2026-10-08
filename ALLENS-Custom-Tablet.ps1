@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:AppName = 'ALLENS Custom Tablet'
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.2.1'
 $script:Repo = 'RockyRoadGames/Allens-custom-tablet'
 $script:ManifestUrl = "https://raw.githubusercontent.com/$($script:Repo)/main/update.json"
 $script:DataRoot = Join-Path $env:USERPROFILE 'YQ10S'
@@ -215,20 +215,36 @@ function LaunchApp {
 
 function Privacy-Audit {
     Require-Tablet
-    $globalDnsMode = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_mode') -AllowFailure).Output.Trim()
-    $globalDnsSpecifier = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_specifier') -AllowFailure).Output.Trim()
+    $dnsMode = (Invoke-Adb @('shell','settings','get','global','private_dns_mode') -AllowFailure).Output.Trim()
+    $dnsDefault = (Invoke-Adb @('shell','settings','get','global','private_dns_default_mode') -AllowFailure).Output.Trim()
+    $dnsSpecifier = (Invoke-Adb @('shell','settings','get','global','private_dns_specifier') -AllowFailure).Output.Trim()
     $vpn = (Invoke-Adb @('shell','settings','--user','0','get','secure','always_on_vpn_app') -AllowFailure).Output.Trim()
     $location = (Invoke-Adb @('shell','settings','--user','0','get','secure','location_mode') -AllowFailure).Output.Trim()
     $adbEnabled = (Invoke-Adb @('shell','settings','get','global','adb_enabled') -AllowFailure).Output.Trim()
-    $wifiScan = (Invoke-Adb @('shell','settings','--user','0','get','secure','wifi_scan_always_enabled') -AllowFailure).Output.Trim()
-    $btScan = (Invoke-Adb @('shell','settings','--user','0','get','secure','bluetooth_scan_always_enabled') -AllowFailure).Output.Trim()
+    $wifiScan = (Invoke-Adb @('shell','settings','get','global','wifi_scan_always_enabled') -AllowFailure).Output.Trim()
+    $bleScan = (Invoke-Adb @('shell','settings','get','global','ble_scan_always_enabled') -AllowFailure).Output.Trim()
+
+    $dnsLabel = switch ($dnsMode.ToLowerInvariant()) {
+        'opportunistic' { 'Automatic/Opportunistic' }
+        'hostname' { 'Private provider' }
+        'off' { 'Off' }
+        default { if ($dnsDefault) { "Default ($dnsDefault)" } else { 'Not explicitly configured / firmware default' } }
+    }
+    $locationLabel = switch ($location) {
+        '0' { 'OFF' }
+        '1' { 'ON (legacy sensors-only value)' }
+        '2' { 'ON (legacy battery-saving value)' }
+        '3' { 'ON (legacy high-accuracy value)' }
+        default { 'Unknown / not exposed' }
+    }
+
     Write-Log '=== PRIVACY AUDIT ==='
-    Write-Log "Private DNS mode: $globalDnsMode | provider: $globalDnsSpecifier"
-    Write-Log "Always-on VPN app: $vpn"
-    Write-Log "Location mode: $location"
-    Write-Log "ADB enabled: $adbEnabled"
-    Write-Log "Wi-Fi scanning always available: $wifiScan"
-    Write-Log "Bluetooth scanning always available: $btScan"
+    Write-Log "Private DNS: $dnsLabel | explicit mode=$dnsMode | default=$dnsDefault | provider=$dnsSpecifier"
+    Write-Log "Always-on VPN app: $(if ($vpn) { $vpn } else { 'none configured' })"
+    Write-Log "Location: $locationLabel"
+    Write-Log "ADB/USB debugging: $(if ($adbEnabled -eq '1') { 'ON (expected while using this tool)' } else { 'OFF' })"
+    Write-Log "Wi-Fi scanning always available: $(if ($wifiScan) { $wifiScan } else { '0 / not explicitly enabled' })"
+    Write-Log "BLE scanning always available: $(if ($bleScan) { $bleScan } else { '0 / not explicitly enabled' })"
     Write-Log 'Privacy audit complete.'
 }
 
@@ -263,16 +279,159 @@ function Performance-Audit {
     $temp = if ($tempRaw -ge 0) { '{0:N1} C' -f ($tempRaw / 10.0) } else { '?' }
     $mem = (Invoke-Adb @('shell','cat','/proc/meminfo') -AllowFailure).Output
     $avail = if ($mem -match 'MemAvailable:[ ]*([0-9]+)[ ]*kB') { [math]::Round(([double]$matches[1])/1024) } else { '?' }
-    $swaps = (Invoke-Adb @('shell','cat','/proc/swaps') -AllowFailure).Output.Trim()
+    $swapTotal = if ($mem -match 'SwapTotal:[ ]*([0-9]+)[ ]*kB') { [math]::Round(([double]$matches[1])/1024) } else { '?' }
+    $swapFree = if ($mem -match 'SwapFree:[ ]*([0-9]+)[ ]*kB') { [math]::Round(([double]$matches[1])/1024) } else { '?' }
+    $zramSize = (Invoke-Adb @('shell','cat','/sys/block/zram0/disksize') -AllowFailure).Output.Trim()
+    $zramMb = if ($zramSize -match '^[0-9]+
+
+function Safe-Cache-Cleanup {
+    Require-Tablet
+    Write-Log 'Safe cache cleanup started (user data is not cleared).'
+    $result = Invoke-Adb @('shell','pm','trim-caches','8589934592') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log 'Safe cache cleanup completed.' } else { Write-Log "Cache cleanup could not be completed: $($result.Output)" }
+}
+
+function Disable-BatterySaver {
+    Require-Tablet
+    $before = (Invoke-Adb @('shell','settings','get','global','low_power') -AllowFailure).Output.Trim()
+    $result = Invoke-Adb @('shell','settings','put','global','low_power','0') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log "Battery Saver forced off (was: $before)." } else { Write-Log 'Battery Saver setting was not accepted.' }
+}
+
+function Stop-OptionalBackground {
+    Require-Tablet
+    $background = @(
+        'com.instagram.android',
+        'com.snapchat.android',
+        'com.pinterest',
+        'com.alibaba.aliexpresshd',
+        'com.netflix.mediaclient',
+        'com.google.android.apps.tachyon',
+        'com.Garawell.BridgeRace',
+        'com.fungames.sniper3d',
+        'com.block.juggle',
+        'com.youmusic.magictiles',
+        'block.app.wars',
+        'com.fungames.blockcraft',
+        'com.nordcurrent.canteenhd'
+    )
+    $count = 0
+    foreach ($pkg in $background) {
+        $path = (Invoke-Adb @('shell','pm','path',$pkg) -AllowFailure).Output.Trim()
+        if ($path) {
+            Invoke-Adb @('shell','am','force-stop',$pkg) -AllowFailure | Out-Null
+            $count++
+        }
+    }
+    Write-Log "Stopped $count optional background apps."
+}
+
+function Check-Update {
+    try {
+        $m = Invoke-RestMethod -Uri $script:ManifestUrl -TimeoutSec 8 -Headers @{ 'User-Agent' = "$($script:AppName)/$($script:AppVersion)" }
+        if ([version]$m.version -gt [version]$script:AppVersion) { Write-Log "Update available: $($m.version)" }
+        else { Write-Log "Customizer is up to date ($($script:AppVersion))." }
+    } catch { Write-Log "Update channel unavailable: $($_.Exception.Message)" }
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = $script:AppName
+$form.Size = New-Object System.Drawing.Size(900,650)
+$form.StartPosition = 'CenterScreen'
+$title = New-Object System.Windows.Forms.Label
+$title.Text = 'ALLENS CUSTOM TABLET'
+$title.Font = New-Object System.Drawing.Font('Segoe UI',20,[System.Drawing.FontStyle]::Bold)
+$title.AutoSize = $true
+$title.Location = New-Object System.Drawing.Point(24,18)
+$form.Controls.Add($title)
+$panel = New-Object System.Windows.Forms.FlowLayoutPanel
+$panel.Location = New-Object System.Drawing.Point(24,62)
+$panel.Size = New-Object System.Drawing.Size(840,130)
+$panel.WrapContents = $true
+$panel.AutoScroll = $true
+$form.Controls.Add($panel)
+
+function Add-ActionButton {
+    param([string]$Text,[scriptblock]$Action)
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Text
+    $button.Size = New-Object System.Drawing.Size(185,42)
+    $localAction = $Action
+    $button.Add_Click({
+        try { & $localAction }
+        catch {
+            Write-Log "ERROR: $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,$script:AppName) | Out-Null
+        }
+    }.GetNewClosure())
+    $panel.Controls.Add($button)
+}
+
+
+Add-ActionButton 'Wallpaper' { Customize-Wallpaper }
+Add-ActionButton 'Home Settings' { Customize-Home }
+Add-ActionButton 'Display Settings' { Customize-Display }
+Add-ActionButton 'Sound Settings' { Customize-Sound }
+Add-ActionButton 'Dark Mode' { Set-DarkMode }
+Add-ActionButton 'Light Mode' { Set-LightMode }
+Add-ActionButton '3-Button Nav' { Set-ThreeButtonNav }
+Add-ActionButton 'Gesture Nav' { Set-GestureNav }
+Add-ActionButton 'Small Text' { Set-FontScale '0.9' }
+Add-ActionButton 'Normal Text' { Set-FontScale '1.0' }
+Add-ActionButton 'Large Text' { Set-FontScale '1.15' }
+Add-ActionButton '5-Min Timeout' { Set-Timeout 300000 }
+Add-ActionButton '10-Min Timeout' { Set-Timeout 600000 }
+Add-ActionButton '30-Min Timeout' { Set-Timeout 1800000 }
+Add-ActionButton 'Auto-Rotate' { Set-AutoRotate }
+Add-ActionButton 'Launch YouTube' { LaunchApp 'com.google.android.youtube' }
+Add-ActionButton 'Launch Photo Vault' { LaunchApp 'com.asurion.android.mediabackup.vault.cricket' }
+
+Add-ActionButton 'Privacy Audit' { Privacy-Audit }
+Add-ActionButton 'Private DNS Automatic' { Set-PrivateDnsAutomatic }
+Add-ActionButton 'Private DNS Off' { Set-PrivateDnsOff }
+Add-ActionButton 'VPN Settings' { Open-SettingsPage 'android.settings.VPN_SETTINGS' }
+Add-ActionButton 'App Permissions' { Invoke-Adb @('shell','am','start','-a','android.intent.action.MANAGE_APP_PERMISSIONS') -AllowFailure | Out-Null }
+Add-ActionButton 'Performance Audit' { Performance-Audit }
+Add-ActionButton 'Safe Cache Cleanup' { Safe-Cache-Cleanup }
+Add-ActionButton 'Battery Saver Off' { Disable-BatterySaver }
+Add-ActionButton 'Stop Optional Background' { Stop-OptionalBackground }
+
+Add-ActionButton 'Device Status' { Device-Status }
+Add-ActionButton 'Safe Tune' { Safe-Tune }
+Add-ActionButton 'Privacy Center' { Privacy-Center }
+Add-ActionButton 'Backup' { Backup }
+Add-ActionButton 'Android Display' { Open-SettingsPage 'android.settings.DISPLAY_SETTINGS' }
+Add-ActionButton 'Default Apps' { Open-SettingsPage 'android.settings.MANAGE_DEFAULT_APPS_SETTINGS' }
+Add-ActionButton 'Notifications' { Open-SettingsPage 'android.settings.NOTIFICATION_SETTINGS' }
+Add-ActionButton 'Storage' { Open-SettingsPage 'android.settings.INTERNAL_STORAGE_SETTINGS' }
+Add-ActionButton 'Gaming: Subway' { Gaming-Prep 'com.kiloo.subwaysurf' }
+Add-ActionButton 'Gaming: Roblox' { Gaming-Prep 'com.roblox.client' }
+Add-ActionButton 'Check for Update' { Check-Update }
+Add-ActionButton 'Open Logs' { Start-Process notepad.exe $script:LogFile }
+
+$script:LogBox = New-Object System.Windows.Forms.TextBox
+$script:LogBox.Multiline = $true
+$script:LogBox.ReadOnly = $true
+$script:LogBox.ScrollBars = 'Vertical'
+$script:LogBox.Font = New-Object System.Drawing.Font('Consolas',9)
+$script:LogBox.Location = New-Object System.Drawing.Point(24,205)
+$script:LogBox.Size = New-Object System.Drawing.Size(840,370)
+$form.Controls.Add($script:LogBox)
+$form.Add_Shown({ if ((Get-TabletConnection).Count -eq 1) { Write-Log 'Tablet connection: OK' } else { Write-Log 'Tablet connection: not detected' }; Check-Update })
+[void]$form.ShowDialog()
+) { [math]::Round(([double]$zramSize)/1MB) } else { '?' }
     $df = (Invoke-Adb @('shell','df','-h','/data') -AllowFailure).Output.Trim()
     $lowPower = (Invoke-Adb @('shell','settings','get','global','low_power') -AllowFailure).Output.Trim()
     $refresh = (Invoke-Adb @('shell','settings','get','system','peak_refresh_rate') -AllowFailure).Output.Trim()
+
     Write-Log '=== PERFORMANCE AUDIT ==='
     Write-Log "Battery: $level% | Temperature: $temp"
     Write-Log "Available RAM: $avail MB"
-    Write-Log "Battery Saver low_power: $lowPower"
-    Write-Log "Peak refresh rate setting: $refresh"
-    Write-Log "ZRAM/swap: $swaps"
+    Write-Log "Swap: $swapFree MB free / $swapTotal MB total | ZRAM configured: $zramMb MB"
+    Write-Log "Battery Saver low_power: $(if ($lowPower) { $lowPower } else { '0 / default' })"
+    Write-Log "Peak refresh rate setting: $(if ($refresh) { $refresh } else { 'firmware default / not exposed' })"
     Write-Log "Storage: $df"
     Write-Log 'Performance audit complete.'
 }
