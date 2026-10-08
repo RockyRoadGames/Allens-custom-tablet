@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:AppName = 'ALLENS Custom Tablet'
-$script:AppVersion = '1.0.2'
+$script:AppVersion = '1.0.3'
 $script:Repo = 'RockyRoadGames/Allens-custom-tablet'
 $script:ManifestUrl = "https://raw.githubusercontent.com/$($script:Repo)/main/update.json"
 $script:DataRoot = Join-Path $env:USERPROFILE 'YQ10S'
@@ -36,9 +36,9 @@ function Invoke-Adb {
 
 function Get-TabletConnection {
     try {
-        $r = Invoke-Adb @('devices')
-        $clean = $r.Output -replace ([char]13).ToString(),''
-        return @($clean.Split([char]10) | Where-Object { $_ -match ' device$' })
+        $r = Invoke-Adb @('get-state')
+        if ($r.Code -eq 0 -and $r.Output.Trim() -eq 'device') { return @('device') }
+        return @()
     } catch { return @() }
 }
 
