@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:AppName = 'ALLENS Custom Tablet'
-$script:AppVersion = '1.0.3'
+$script:AppVersion = '1.1.0'
 $script:Repo = 'RockyRoadGames/Allens-custom-tablet'
 $script:ManifestUrl = "https://raw.githubusercontent.com/$($script:Repo)/main/update.json"
 $script:DataRoot = Join-Path $env:USERPROFILE 'YQ10S'
@@ -122,6 +122,95 @@ function Gaming-Prep {
     Write-Log 'Launch requested.'
 }
 
+
+function Save-SettingBackup {
+    param([string]$Scope,[string]$Name)
+    $dir = Join-Path $script:BackupRoot ('setting-' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $value = (Invoke-Adb @('shell','settings','--user','0','get',$Scope,$Name)).Output.Trim()
+    Set-Content -LiteralPath (Join-Path $dir "$Scope-$Name.txt") -Value $value -Encoding UTF8
+    return $dir
+}
+
+function Customize-Home {
+    Open-SettingsPage 'android.settings.HOME_SETTINGS'
+}
+
+function Customize-Wallpaper {
+    Open-SettingsPage 'android.settings.WALLPAPER_SETTINGS'
+}
+
+function Customize-Display {
+    Open-SettingsPage 'android.settings.DISPLAY_SETTINGS'
+}
+
+function Customize-Sound {
+    Open-SettingsPage 'android.settings.SOUND_SETTINGS'
+}
+
+function Customize-HomeLayout {
+    Open-SettingsPage 'android.settings.HOME_SETTINGS'
+}
+
+function Set-DarkMode {
+    Require-Tablet
+    Invoke-Adb @('shell','cmd','uimode','night','yes') | Out-Null
+    Write-Log 'Dark mode enabled.'
+}
+
+function Set-LightMode {
+    Require-Tablet
+    Invoke-Adb @('shell','cmd','uimode','night','no') | Out-Null
+    Write-Log 'Light mode enabled.'
+}
+
+function Set-ThreeButtonNav {
+    Require-Tablet
+    $dir = Save-SettingBackup 'secure' 'navigation_mode'
+    $result = Invoke-Adb @('shell','settings','--user','0','put','secure','navigation_mode','0') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log '3-button navigation requested.' } else { Write-Log '3-button navigation was not accepted by this firmware.' }
+    Write-Log "Navigation backup: $dir"
+}
+
+function Set-GestureNav {
+    Require-Tablet
+    $dir = Save-SettingBackup 'secure' 'navigation_mode'
+    $result = Invoke-Adb @('shell','settings','--user','0','put','secure','navigation_mode','2') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log 'Gesture navigation requested.' } else { Write-Log 'Gesture navigation was not accepted by this firmware.' }
+    Write-Log "Navigation backup: $dir"
+}
+
+function Set-FontScale {
+    param([string]$Value)
+    Require-Tablet
+    $dir = Save-SettingBackup 'system' 'font_scale'
+    $result = Invoke-Adb @('shell','settings','--user','0','put','system','font_scale',$Value) -AllowFailure
+    if ($result.Code -eq 0) { Write-Log "Font scale set to $Value." } else { Write-Log "Font scale change was not accepted." }
+    Write-Log "Font backup: $dir"
+}
+
+function Set-Timeout {
+    param([int]$Milliseconds)
+    Require-Tablet
+    $dir = Save-SettingBackup 'system' 'screen_off_timeout'
+    $result = Invoke-Adb @('shell','settings','--user','0','put','system','screen_off_timeout',[string]$Milliseconds) -AllowFailure
+    if ($result.Code -eq 0) { Write-Log "Screen timeout set to $([math]::Round($Milliseconds/60000,0)) minutes." } else { Write-Log 'Screen timeout change was not accepted.' }
+    Write-Log "Timeout backup: $dir"
+}
+
+function Set-AutoRotate {
+    Require-Tablet
+    $result = Invoke-Adb @('shell','settings','--user','0','put','system','accelerometer_rotation','1') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log 'Auto-rotate enabled.' } else { Write-Log 'Auto-rotate change was not accepted.' }
+}
+
+function LaunchApp {
+    param([string]$PackageName)
+    Require-Tablet
+    Invoke-Adb @('shell','monkey','-p',$PackageName,'-c','android.intent.category.LAUNCHER','1') -AllowFailure | Out-Null
+    Write-Log "Launch requested: $PackageName"
+}
+
 function Check-Update {
     try {
         $m = Invoke-RestMethod -Uri $script:ManifestUrl -TimeoutSec 8 -Headers @{ 'User-Agent' = "$($script:AppName)/$($script:AppVersion)" }
@@ -164,6 +253,25 @@ function Add-ActionButton {
     }.GetNewClosure())
     $panel.Controls.Add($button)
 }
+
+
+Add-ActionButton 'Wallpaper' { Customize-Wallpaper }
+Add-ActionButton 'Home Settings' { Customize-Home }
+Add-ActionButton 'Display Settings' { Customize-Display }
+Add-ActionButton 'Sound Settings' { Customize-Sound }
+Add-ActionButton 'Dark Mode' { Set-DarkMode }
+Add-ActionButton 'Light Mode' { Set-LightMode }
+Add-ActionButton '3-Button Nav' { Set-ThreeButtonNav }
+Add-ActionButton 'Gesture Nav' { Set-GestureNav }
+Add-ActionButton 'Small Text' { Set-FontScale '0.9' }
+Add-ActionButton 'Normal Text' { Set-FontScale '1.0' }
+Add-ActionButton 'Large Text' { Set-FontScale '1.15' }
+Add-ActionButton '5-Min Timeout' { Set-Timeout 300000 }
+Add-ActionButton '10-Min Timeout' { Set-Timeout 600000 }
+Add-ActionButton '30-Min Timeout' { Set-Timeout 1800000 }
+Add-ActionButton 'Auto-Rotate' { Set-AutoRotate }
+Add-ActionButton 'Launch YouTube' { LaunchApp 'com.google.android.youtube' }
+Add-ActionButton 'Launch Photo Vault' { LaunchApp 'com.asurion.android.mediabackup.vault.cricket' }
 
 Add-ActionButton 'Device Status' { Device-Status }
 Add-ActionButton 'Safe Tune' { Safe-Tune }
