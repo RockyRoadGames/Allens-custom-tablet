@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:AppName = 'ALLENS Custom Tablet'
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.2.0'
 $script:Repo = 'RockyRoadGames/Allens-custom-tablet'
 $script:ManifestUrl = "https://raw.githubusercontent.com/$($script:Repo)/main/update.json"
 $script:DataRoot = Join-Path $env:USERPROFILE 'YQ10S'
@@ -91,9 +91,10 @@ function Safe-Tune {
 
 function Privacy-Center {
     Require-Tablet
-    $dns = (Invoke-Adb @('shell','settings','--user','0','get','secure','private_dns_mode') -AllowFailure).Output.Trim()
+    $dns = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_mode') -AllowFailure).Output.Trim()
+    $specifier = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_specifier') -AllowFailure).Output.Trim()
     $vpn = (Invoke-Adb @('shell','settings','--user','0','get','secure','always_on_vpn_app') -AllowFailure).Output.Trim()
-    Write-Log "Private DNS: $dns | Always-on VPN: $vpn"
+    Write-Log "Private DNS: $dns | provider: $specifier | Always-on VPN: $vpn"
     Invoke-Adb @('shell','am','start','-a','android.settings.PRIVACY_SETTINGS') -AllowFailure | Out-Null
 }
 
@@ -211,6 +212,113 @@ function LaunchApp {
     Write-Log "Launch requested: $PackageName"
 }
 
+
+function Privacy-Audit {
+    Require-Tablet
+    $globalDnsMode = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_mode') -AllowFailure).Output.Trim()
+    $globalDnsSpecifier = (Invoke-Adb @('shell','settings','--user','0','get','global','private_dns_specifier') -AllowFailure).Output.Trim()
+    $vpn = (Invoke-Adb @('shell','settings','--user','0','get','secure','always_on_vpn_app') -AllowFailure).Output.Trim()
+    $location = (Invoke-Adb @('shell','settings','--user','0','get','secure','location_mode') -AllowFailure).Output.Trim()
+    $adbEnabled = (Invoke-Adb @('shell','settings','get','global','adb_enabled') -AllowFailure).Output.Trim()
+    $wifiScan = (Invoke-Adb @('shell','settings','--user','0','get','secure','wifi_scan_always_enabled') -AllowFailure).Output.Trim()
+    $btScan = (Invoke-Adb @('shell','settings','--user','0','get','secure','bluetooth_scan_always_enabled') -AllowFailure).Output.Trim()
+    Write-Log '=== PRIVACY AUDIT ==='
+    Write-Log "Private DNS mode: $globalDnsMode | provider: $globalDnsSpecifier"
+    Write-Log "Always-on VPN app: $vpn"
+    Write-Log "Location mode: $location"
+    Write-Log "ADB enabled: $adbEnabled"
+    Write-Log "Wi-Fi scanning always available: $wifiScan"
+    Write-Log "Bluetooth scanning always available: $btScan"
+    Write-Log 'Privacy audit complete.'
+}
+
+function Set-PrivateDnsAutomatic {
+    Require-Tablet
+    $dir = Join-Path $script:BackupRoot ('privacy-dns-' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    foreach ($name in @('private_dns_mode','private_dns_specifier')) {
+        (Invoke-Adb @('shell','settings','--user','0','get','global',$name) -AllowFailure).Output.Trim() |
+            Set-Content -LiteralPath (Join-Path $dir "global-$name.txt") -Encoding UTF8
+    }
+    $result = Invoke-Adb @('shell','settings','--user','0','put','global','private_dns_mode','opportunistic') -AllowFailure
+    if ($result.Code -eq 0) {
+        Write-Log 'Private DNS set to Automatic/Opportunistic.'
+    } else {
+        Write-Log 'Private DNS change was not accepted by this firmware.'
+    }
+    Write-Log "Private DNS backup: $dir"
+}
+
+function Set-PrivateDnsOff {
+    Require-Tablet
+    $result = Invoke-Adb @('shell','settings','--user','0','put','global','private_dns_mode','off') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log 'Private DNS disabled.' } else { Write-Log 'Private DNS change was not accepted by this firmware.' }
+}
+
+function Performance-Audit {
+    Require-Tablet
+    $battery = (Invoke-Adb @('shell','dumpsys','battery') -AllowFailure).Output
+    $level = if ($battery -match 'level:[ ]*([0-9]+)') { $matches[1] } else { '?' }
+    $tempRaw = if ($battery -match 'temperature:[ ]*([0-9]+)') { [int]$matches[1] } else { -1 }
+    $temp = if ($tempRaw -ge 0) { '{0:N1} C' -f ($tempRaw / 10.0) } else { '?' }
+    $mem = (Invoke-Adb @('shell','cat','/proc/meminfo') -AllowFailure).Output
+    $avail = if ($mem -match 'MemAvailable:[ ]*([0-9]+)[ ]*kB') { [math]::Round(([double]$matches[1])/1024) } else { '?' }
+    $swaps = (Invoke-Adb @('shell','cat','/proc/swaps') -AllowFailure).Output.Trim()
+    $df = (Invoke-Adb @('shell','df','-h','/data') -AllowFailure).Output.Trim()
+    $lowPower = (Invoke-Adb @('shell','settings','get','global','low_power') -AllowFailure).Output.Trim()
+    $refresh = (Invoke-Adb @('shell','settings','get','system','peak_refresh_rate') -AllowFailure).Output.Trim()
+    Write-Log '=== PERFORMANCE AUDIT ==='
+    Write-Log "Battery: $level% | Temperature: $temp"
+    Write-Log "Available RAM: $avail MB"
+    Write-Log "Battery Saver low_power: $lowPower"
+    Write-Log "Peak refresh rate setting: $refresh"
+    Write-Log "ZRAM/swap: $swaps"
+    Write-Log "Storage: $df"
+    Write-Log 'Performance audit complete.'
+}
+
+function Safe-Cache-Cleanup {
+    Require-Tablet
+    Write-Log 'Safe cache cleanup started (user data is not cleared).'
+    $result = Invoke-Adb @('shell','pm','trim-caches','8589934592') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log 'Safe cache cleanup completed.' } else { Write-Log "Cache cleanup could not be completed: $($result.Output)" }
+}
+
+function Disable-BatterySaver {
+    Require-Tablet
+    $before = (Invoke-Adb @('shell','settings','get','global','low_power') -AllowFailure).Output.Trim()
+    $result = Invoke-Adb @('shell','settings','put','global','low_power','0') -AllowFailure
+    if ($result.Code -eq 0) { Write-Log "Battery Saver forced off (was: $before)." } else { Write-Log 'Battery Saver setting was not accepted.' }
+}
+
+function Stop-OptionalBackground {
+    Require-Tablet
+    $background = @(
+        'com.instagram.android',
+        'com.snapchat.android',
+        'com.pinterest',
+        'com.alibaba.aliexpresshd',
+        'com.netflix.mediaclient',
+        'com.google.android.apps.tachyon',
+        'com.Garawell.BridgeRace',
+        'com.fungames.sniper3d',
+        'com.block.juggle',
+        'com.youmusic.magictiles',
+        'block.app.wars',
+        'com.fungames.blockcraft',
+        'com.nordcurrent.canteenhd'
+    )
+    $count = 0
+    foreach ($pkg in $background) {
+        $path = (Invoke-Adb @('shell','pm','path',$pkg) -AllowFailure).Output.Trim()
+        if ($path) {
+            Invoke-Adb @('shell','am','force-stop',$pkg) -AllowFailure | Out-Null
+            $count++
+        }
+    }
+    Write-Log "Stopped $count optional background apps."
+}
+
 function Check-Update {
     try {
         $m = Invoke-RestMethod -Uri $script:ManifestUrl -TimeoutSec 8 -Headers @{ 'User-Agent' = "$($script:AppName)/$($script:AppVersion)" }
@@ -272,6 +380,16 @@ Add-ActionButton '30-Min Timeout' { Set-Timeout 1800000 }
 Add-ActionButton 'Auto-Rotate' { Set-AutoRotate }
 Add-ActionButton 'Launch YouTube' { LaunchApp 'com.google.android.youtube' }
 Add-ActionButton 'Launch Photo Vault' { LaunchApp 'com.asurion.android.mediabackup.vault.cricket' }
+
+Add-ActionButton 'Privacy Audit' { Privacy-Audit }
+Add-ActionButton 'Private DNS Automatic' { Set-PrivateDnsAutomatic }
+Add-ActionButton 'Private DNS Off' { Set-PrivateDnsOff }
+Add-ActionButton 'VPN Settings' { Open-SettingsPage 'android.settings.VPN_SETTINGS' }
+Add-ActionButton 'App Permissions' { Invoke-Adb @('shell','am','start','-a','android.intent.action.MANAGE_APP_PERMISSIONS') -AllowFailure | Out-Null }
+Add-ActionButton 'Performance Audit' { Performance-Audit }
+Add-ActionButton 'Safe Cache Cleanup' { Safe-Cache-Cleanup }
+Add-ActionButton 'Battery Saver Off' { Disable-BatterySaver }
+Add-ActionButton 'Stop Optional Background' { Stop-OptionalBackground }
 
 Add-ActionButton 'Device Status' { Device-Status }
 Add-ActionButton 'Safe Tune' { Safe-Tune }
